@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,19 +10,21 @@ export const EXIT = { arguments: 2, exists: 3, pi: 4, malformed: 5 };
 const here = dirname(fileURLToPath(import.meta.url));
 const modes = new Set(["security", "maintainability", "general"]);
 const usage = `usage: nightwatch <security|maintainability|general> <path> --base-url <loopback-url> --model <id>
-  [--api-key-env <name>] [--context-window <tokens>] [--output <path>] [--fresh]`;
+  [--api-key-env <name>] [--context-window <tokens>] [--output <path>] [--fresh|--resume]`;
 
 export function parseArgs(argv) {
   if (!modes.has(argv[0]) || !argv[1] || argv[1].startsWith("-")) throw new Error(usage);
-  const out = { command: argv[0], path: argv[1], fresh: false, contextWindow: 65536, output: "NIGHTWATCH_REPORT.md" };
+  const out = { command: argv[0], path: argv[1], fresh: false, resume: false, contextWindow: 65536, output: "NIGHTWATCH_REPORT.md" };
   const valued = new Map([["--base-url", "baseUrl"], ["--model", "model"], ["--api-key-env", "apiKeyEnv"], ["--context-window", "contextWindow"], ["--output", "output"]]);
   for (let i = 2; i < argv.length; i++) {
     if (argv[i] === "--fresh") { out.fresh = true; continue; }
+    if (argv[i] === "--resume") { out.resume = true; continue; }
     const key = valued.get(argv[i]);
     if (!key || !argv[i + 1]) throw new Error(`invalid argument: ${argv[i]}\n${usage}`);
     out[key] = argv[++i];
   }
   if (!out.baseUrl || !out.model) throw new Error(`--base-url and --model are required\n${usage}`);
+  if (out.fresh && out.resume) throw new Error("--fresh and --resume cannot be combined");
   const url = new URL(out.baseUrl);
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("--base-url must use http or https");
   if (!["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname)) throw new Error("--base-url must be loopback");
@@ -63,6 +65,30 @@ export async function containedDirectory(root, directory) {
   if (actual !== root && !actual.startsWith(root + sep)) throw new Error("write path escapes repository through symlink");
 }
 
+async function gitState(repository) {
+  const run = args => new Promise(resolve => {
+    const child = spawn("git", args, { cwd: repository, stdio: ["ignore", "pipe", "ignore"] }); let value = "";
+    child.stdout.on("data", chunk => value += chunk); child.on("error", () => resolve(null)); child.on("close", code => resolve(code === 0 ? value.trim() : null));
+  });
+  return { commit: await run(["rev-parse", "HEAD"]), dirty: await run(["status", "--porcelain=v1", "--untracked-files=all"]) };
+}
+
+async function resumableRun(repository, mode, state) {
+  const runs = join(repository, ".nightwatch", "runs");
+  const names = await readdir(runs).catch(() => []);
+  for (const name of names.sort().reverse()) {
+    const directory = join(runs, name);
+    try {
+      const metadata = JSON.parse(await readFile(join(directory, "metadata.json"), "utf8"));
+      if (metadata.mode !== mode || metadata.status === "complete") continue;
+      if (!metadata.git || metadata.git.commit !== state.commit || metadata.git.dirty !== state.dirty) throw new Error("repository changed since the resumable run");
+      const session = (await readdir(join(directory, "session"))).find(file => file.endsWith(".jsonl"));
+      if (session) return { directory, session: join(directory, "session", session), metadata };
+    } catch (error) { if (error.message === "repository changed since the resumable run") throw error; }
+  }
+  throw new Error("no matching failed run is available to resume");
+}
+
 async function main(argv = process.argv.slice(2)) {
   let options;
   try { options = parseArgs(argv); } catch (error) { console.error(error.message); return EXIT.arguments; }
@@ -76,15 +102,22 @@ async function main(argv = process.argv.slice(2)) {
   try { await access(output, constants.F_OK); if (!options.fresh) { console.error(`${output} already exists; use --fresh to replace it`); return EXIT.exists; } }
   catch (error) { if (error.code !== "ENOENT") throw error; }
 
-  const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
-  const runDir = join(repository, ".nightwatch", "runs", runId);
+  const git = await gitState(repository);
+  const startedAt = new Date().toISOString();
+  const runId = `${startedAt.replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
+  let runDir = join(repository, ".nightwatch", "runs", runId), resumeSession, originalStart = startedAt;
+  if (options.resume) {
+    try { const previous = await resumableRun(repository, options.command, git); runDir = previous.directory; resumeSession = previous.session; originalStart = previous.metadata.startedAt || originalStart; }
+    catch (error) { console.error(error.message); return EXIT.arguments; }
+  }
   const agentDir = join(runDir, "agent");
   const sessionDir = join(runDir, "session");
-  try { await containedDirectory(repository, sessionDir); await mkdir(agentDir); }
+  try { await containedDirectory(repository, sessionDir); await mkdir(agentDir, { recursive: true }); }
   catch { console.error(".nightwatch must be a real directory inside the repository"); return EXIT.arguments; }
   const extension = resolve(here, "../src/audit-extension.js");
   const skill = resolve(here, `../skills/${options.command}/SKILL.md`);
   const piArgs = ["--mode", "json", "--print", "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes", "--no-builtin-tools", "--no-approve", "--extension", extension, "--skill", skill, "--tools", "list_repository,read_repository_file,search_repository", "--session-dir", sessionDir, "--model", `nightwatch-local/${options.model}`, "--thinking", "medium", "--", `Perform the ${options.command} review now. The trusted review skill is already in your system prompt; do not search for or reread it. Return only its complete Markdown report.`];
+  if (resumeSession) piArgs.splice(piArgs.indexOf("--"), 0, "--session", resumeSession);
   const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir, NIGHTWATCH_REPOSITORY: repository, NIGHTWATCH_MODE: options.command, NIGHTWATCH_BASE_URL: options.baseUrl, NIGHTWATCH_MODEL: options.model, NIGHTWATCH_CONTEXT_WINDOW: String(options.contextWindow), NIGHTWATCH_OUTPUT: output };
   if (options.apiKeyEnv) {
     if (!process.env[options.apiKeyEnv]) { console.error(`credential environment variable ${options.apiKeyEnv} is not set`); return EXIT.arguments; }
@@ -106,9 +139,10 @@ async function main(argv = process.argv.slice(2)) {
   let finalText;
   // Parse once after completion so chunk boundaries and the final unterminated line are harmless.
   for (const line of raw.split("\n")) finalText = assistantText(line) ?? finalText;
-  const metadata = { version: "0.1.0", runId, mode: options.command, repository, model: options.model, baseUrl: options.baseUrl, contextWindow: options.contextWindow, startedAt: runId.slice(0, 24), endedAt: new Date().toISOString(), exitCode: code };
+  const valid = code === 0 && validateReport(finalText, options.command);
+  const metadata = { version: "0.1.0", runId: runDir.split(sep).at(-1), mode: options.command, repository, model: options.model, baseUrl: options.baseUrl, contextWindow: options.contextWindow, git, resumed: Boolean(resumeSession), startedAt: originalStart, endedAt: new Date().toISOString(), exitCode: code, status: valid ? "complete" : code === 0 ? "malformed" : "pi-failure" };
   await writeFile(join(runDir, "metadata.json"), JSON.stringify(metadata, null, 2) + "\n", { mode: 0o600 });
-  if (code !== 0 || !validateReport(finalText, options.command)) {
+  if (!valid) {
     await writeFile(join(runDir, "diagnostic.log"), `AUDIT INCOMPLETE\n\n${stderr}\n${raw}`, { mode: 0o600 });
     console.error(code !== 0 ? `Pi/model failed (exit ${code}); diagnostics preserved in ${runDir}` : `malformed report; diagnostics preserved in ${runDir}`);
     return code !== 0 ? EXIT.pi : EXIT.malformed;

@@ -7,14 +7,14 @@ The implemented constrained proof of concept now supports the three MVP review m
 ```text
 nightwatch <security|maintainability|general> <path> --base-url <loopback-url> --model <id>
   [--api-key-env <name>] [--context-window <tokens>]
-  [--output <path>] [--fresh]
+  [--output <path>] [--fresh|--resume]
 ```
 
 Nightwatch wraps the installed Pi 0.85 executable in JSON, noninteractive, offline mode. Each run gets private agent and session directories under `.nightwatch/runs/<run-id>/`. Global/project extensions, skills, prompt templates, context files, themes, approval, and built-in tools are disabled; only Nightwatch's extension, selected trusted review skill, and bounded repository list/read/search tools are enabled. Wrapper-owned write paths are canonicalized to reject symlink escapes. The wrapper alone validates and atomically publishes the report. It keeps compact metadata and Pi's native session JSONL, adding raw diagnostics only when a run fails or returns malformed output.
 
 The extension guards reduce the agent's capabilities but are not a process sandbox. "No network" applies to audit tools; transport to the explicitly supplied loopback model endpoint remains allowed. A loopback LiteLLM URL does not prove that LiteLLM routes upstream requests locally, so Nightwatch makes no such privacy claim.
 
-Analyzers, explicit resume UX, remaining review modes, profiles, configuration files, custom checkpoint/compaction/event logs, and council mode are deferred. Pi's native persisted session is retained so resume can be designed later without duplicating Pi machinery. The Pi SDK remains uninstalled unless executable integration exposes a concrete limitation.
+Failed runs can be continued with `--resume` when their Git commit and working-tree state still match; this reuses Pi's native session rather than duplicating checkpoint or event machinery. Analyzers, remaining review modes, profiles, configuration files, custom checkpoint/compaction/event logs, and council mode are deferred. The Pi SDK remains uninstalled unless executable integration exposes a concrete limitation.
 
 ## 1. Project Summary
 

@@ -34,6 +34,7 @@ test("arguments require a model and loopback endpoint", () => {
   assert.equal(parseArgs(["security", ".", "--model", "m", "--base-url", "http://[::1]:4000/v1"]).model, "m");
   assert.equal(parseArgs(["maintainability", ".", "--model", "m", "--base-url", "http://localhost/v1"]).command, "maintainability");
   assert.equal(parseArgs(["general", ".", "--model", "m", "--base-url", "http://localhost/v1"]).command, "general");
+  assert.throws(() => parseArgs(["security", ".", "--model", "m", "--base-url", "http://localhost/v1", "--fresh", "--resume"]), /cannot be combined/);
 });
 
 test("report validation checks structure and unique findings", () => {
@@ -101,4 +102,16 @@ test("malformed output and Pi failure do not publish", async () => {
   const args = ["security", root, "--base-url", "http://localhost:4000/v1", "--model", "local"];
   let result = await runCli(args, { NIGHTWATCH_PI: fake }); assert.equal(result.code, 5); await assert.rejects(readFile(join(root, "NIGHTWATCH_REPORT.md")));
   await writeFile(fake, "#!/bin/sh\nexit 9\n"); result = await runCli(args, { NIGHTWATCH_PI: fake }); assert.equal(result.code, 4);
+});
+
+test("resume reuses Pi's failed session", async () => {
+  const root = await fixture(), fake = join(root, "fake-pi"), captured = join(root, "args"), run = join(root, ".nightwatch", "runs", "2026-test"), session = join(run, "session", "audit.jsonl");
+  await mkdir(join(run, "agent"), { recursive: true }); await mkdir(join(run, "session")); await writeFile(session, "{}\n");
+  await writeFile(join(run, "metadata.json"), JSON.stringify({ mode: "security", status: "malformed", git: { commit: null, dirty: null } }));
+  const event = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: validReport }] } });
+  await writeFile(fake, `#!/bin/sh\nprintf '%s\\n' "$@" > "$CAPTURE"\nprintf '%s\\n' '${event}'\n`); await chmod(fake, 0o755);
+  const result = await runCli(["security", root, "--base-url", "http://localhost:4000/v1", "--model", "local", "--resume"], { NIGHTWATCH_PI: fake, CAPTURE: captured });
+  assert.equal(result.code, 0, result.stderr);
+  const args = (await readFile(captured, "utf8")).trim().split("\n");
+  assert.deepEqual(args.slice(args.indexOf("--session"), args.indexOf("--session") + 2), ["--session", session]);
 });
