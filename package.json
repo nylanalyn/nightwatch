@@ -1,0 +1,9 @@
+{
+  "name": "nightwatch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "nightwatch": "bin/nightwatch.js" },
+  "scripts": { "test": "node --test" },
+  "engines": { "node": ">=20" }
+}

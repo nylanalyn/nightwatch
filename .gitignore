@@ -1,0 +1,3 @@
+.nightwatch/
+NIGHTWATCH_REPORT*.md
+node_modules/
