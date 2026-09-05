@@ -2,11 +2,12 @@
 
 ## Milestone 1 implementation decisions
 
-The implemented constrained proof of concept now supports the three MVP review modes:
+The constrained runner now supports all planned single-reviewer modes:
 
 ```text
-nightwatch <security|maintainability|general> <path> --base-url <loopback-url> --model <id>
+nightwatch <security|maintainability|consistency|plan|ux|ideas|balance|adversary|general> <path> --base-url <loopback-url> --model <id>
   [--api-key-env <name>] [--context-window <tokens>]
+  [--profile <generic|irc-bot|web-app|simulation>]
   [--output <path>] [--fresh|--resume]
 ```
 
@@ -14,7 +15,7 @@ Nightwatch wraps the installed Pi 0.85 executable in JSON, noninteractive, offli
 
 The extension guards reduce the agent's capabilities but are not a process sandbox. "No network" applies to audit tools; transport to the explicitly supplied loopback model endpoint remains allowed. A loopback LiteLLM URL does not prove that LiteLLM routes upstream requests locally, so Nightwatch makes no such privacy claim.
 
-Failed runs can be continued with `--resume` when their Git commit and working-tree state still match; this reuses Pi's native session rather than duplicating checkpoint or event machinery. Analyzers, remaining review modes, profiles, configuration files, custom checkpoint/compaction/event logs, and council mode are deferred. The Pi SDK remains uninstalled unless executable integration exposes a concrete limitation.
+Failed runs can be continued with `--resume` when their Git commit, working-tree state, mode, and profile still match; this reuses Pi's native session rather than duplicating checkpoint or event machinery. Four explicit bundled profiles are supported: generic, IRC bot, web application, and simulation. Analyzers, project-defined profiles, configuration files, custom checkpoint/compaction/event logs, and council mode are deferred. The Pi SDK remains uninstalled unless executable integration exposes a concrete limitation.
 
 ## 1. Project Summary
 

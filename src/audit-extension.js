@@ -8,7 +8,8 @@ export default function (pi) {
   const root = process.env.NIGHTWATCH_REPOSITORY;
   if (!root) throw new Error("NIGHTWATCH_REPOSITORY is required");
   const skill = readFileSync(new URL(`../skills/${process.env.NIGHTWATCH_MODE}/SKILL.md`, import.meta.url), "utf8");
-  pi.on("before_agent_start", event => ({ systemPrompt: `${event.systemPrompt}\n\n${skill}` }));
+  const profile = readFileSync(new URL(`../profiles/${process.env.NIGHTWATCH_PROFILE}.md`, import.meta.url), "utf8");
+  pi.on("before_agent_start", event => ({ systemPrompt: `${event.systemPrompt}\n\n${skill}\n\n${profile}` }));
   pi.registerProvider("nightwatch-local", {
     baseUrl: process.env.NIGHTWATCH_BASE_URL,
     apiKey: process.env.NIGHTWATCH_API_KEY || "not-required",

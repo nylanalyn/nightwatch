@@ -34,6 +34,10 @@ test("arguments require a model and loopback endpoint", () => {
   assert.equal(parseArgs(["security", ".", "--model", "m", "--base-url", "http://[::1]:4000/v1"]).model, "m");
   assert.equal(parseArgs(["maintainability", ".", "--model", "m", "--base-url", "http://localhost/v1"]).command, "maintainability");
   assert.equal(parseArgs(["general", ".", "--model", "m", "--base-url", "http://localhost/v1"]).command, "general");
+  for (const mode of ["consistency", "plan", "ux", "ideas", "balance", "adversary"]) assert.equal(parseArgs([mode, ".", "--model", "m", "--base-url", "http://localhost/v1"]).command, mode);
+  assert.equal(parseArgs(["general", ".", "--model", "m", "--base-url", "http://localhost/v1"]).profile, "generic");
+  assert.equal(parseArgs(["security", ".", "--model", "m", "--base-url", "http://localhost/v1", "--profile", "web-app"]).profile, "web-app");
+  assert.throws(() => parseArgs(["security", ".", "--model", "m", "--base-url", "http://localhost/v1", "--profile", "unknown"]), /unknown profile/);
   assert.throws(() => parseArgs(["security", ".", "--model", "m", "--base-url", "http://localhost/v1", "--fresh", "--resume"]), /cannot be combined/);
 });
 
@@ -44,6 +48,8 @@ test("report validation checks structure and unique findings", () => {
   assert.equal(validateReport(validReport.replace("No supported findings.", finding + finding)), false);
   assert.equal(assistantText(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [null] } })), "");
   assert.equal(assistantText(JSON.stringify({ type: "message_end", message: { role: "assistant", content: "text" } })), undefined);
+  const ux = validReport.replace("Security", "UX").replace("No supported findings.", "### UX-001 — Help\nSeverity: LOW\nConfidence: HIGH\nAffected Files: README.md\nEvidence: e\nSuggested Action: s\nVerification: v");
+  assert.equal(validateReport(ux, "ux"), true);
 });
 
 test("wrapper write directories reject symlink escapes", async () => {
@@ -81,6 +87,11 @@ function runCli(args, env) {
     child.on("error", reject); child.on("close", code => done({ code, stdout, stderr }));
   });
 }
+
+test("help prints the implemented interface", async () => {
+  const result = await runCli(["--help"]);
+  assert.equal(result.code, 0);
+});
 
 test("CLI locks Pi down, publishes valid output, and enforces fresh", async () => {
   const root = await fixture(), fake = join(root, "fake-pi"), captured = join(root, "args.json");
