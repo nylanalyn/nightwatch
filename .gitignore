@@ -1,3 +1,5 @@
-.nightwatch/
+.nightwatch/*
+!.nightwatch/config.json
+!.nightwatch/config.example.json
 NIGHTWATCH_REPORT*.md
 node_modules/
