@@ -79,31 +79,17 @@ export async function checkJavaScriptSyntax(root, requested, signal, scopes) {
   }
 }
 
-export async function repositoryScopes(root, targetBytes) {
+export async function repositoryScopes(root, targetBytes, maxFiles = 50) {
   const listing = await runRg(root, ["--files", "--hidden", ...rgExclusions], undefined, 4 * 1024 * 1024, 100_000);
   if (listing.endsWith("[output truncated]")) throw new Error("repository file list exceeds the supported limit");
   const files = [];
   for (const path of listing.trim().split("\n").filter(Boolean).sort()) files.push({ path, size: (await lstat(await safePath(root, path))).size });
   if (!files.length) return [["."]];
-  const atoms = [];
-  const split = (entries, prefix = "") => {
-    const size = entries.reduce((sum, file) => sum + file.size, 0);
-    if (prefix && size <= targetBytes) { atoms.push({ path: prefix, size }); return; }
-    const groups = new Map();
-    for (const file of entries) {
-      const rest = prefix ? file.path.slice(prefix.length + 1) : file.path;
-      const slash = rest.indexOf("/"), part = slash === -1 ? file.path : `${prefix ? `${prefix}/` : ""}${rest.slice(0, slash)}`;
-      if (!groups.has(part)) groups.set(part, []);
-      groups.get(part).push(file);
-    }
-    for (const [path, group] of groups) group.length === 1 && group[0].path === path ? atoms.push({ path, size: group[0].size }) : split(group, path);
-  };
-  split(files);
   const scopes = [];
-  for (const atom of atoms) {
+  for (const file of files) {
     const current = scopes.at(-1);
-    if (current && current.paths.length < 50 && current.size + atom.size <= targetBytes) { current.paths.push(atom.path); current.size += atom.size; }
-    else scopes.push({ paths: [atom.path], size: atom.size });
+    if (current && current.paths.length < maxFiles && current.size + file.size <= targetBytes) { current.paths.push(file.path); current.size += file.size; }
+    else scopes.push({ paths: [file.path], size: file.size });
   }
   return scopes.map(scope => scope.paths);
 }

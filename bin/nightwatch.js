@@ -87,7 +87,17 @@ export function validateReport(text, mode = "security") {
   if (new Set(ids).size !== ids.length) return false;
   const sections = text.split(new RegExp(`^#{1,6} +(?=${prefix}-\\d{3}\\b)`, "gm")).slice(1);
   const fields = ["Evidence", "Affected Files", "Severity", "Confidence", "Suggested Action", "Verification", ...(mode === "plan" ? ["Classification"] : []), ...(mode === "ideas" ? ["User Value", "Implementation Cost", "Complexity Risk", "Fit"] : [])];
-  return sections.every(s => fields.every(k => new RegExp(`(?:^|\\n)(?:#{1,6} +|\\*\\*)?${k}`, "i").test(s)));
+  return sections.every(s => fields.every(k => new RegExp(`(?:^|\\n)[ \\t]*(?:[-*+] +)?(?:#{1,6} +|\\*\\*)?${k}`, "i").test(s)));
+}
+
+export function hasIncompleteStatus(text) {
+  const status = text?.split(/^#{1,6} +Run Status[ \t]*$/im)[1]?.split(/^#{1,6} +/m)[0] || "";
+  return /\bAUDIT INCOMPLETE\b/i.test(status);
+}
+
+export function unreviewedPaths(text, scope) {
+  const section = text?.split(/^## +Unreviewed Areas[ \t]*$/im)[1]?.split(/^## +/m)[0] || "";
+  return scope.filter(path => section.includes(`\`${path}\``));
 }
 
 export async function containedDirectory(root, directory) {
@@ -195,32 +205,39 @@ async function main(argv = process.argv.slice(2)) {
     return args;
   };
   // ponytail: source bytes only approximate review cost; replace with measured token planning if this heuristic proves inadequate.
-  const targetBytes = Math.min(2 * 1024 * 1024, Math.max(512 * 1024, options.contextWindow * 16));
+  const targetBytes = Math.min(512 * 1024, Math.max(64 * 1024, options.contextWindow * 4));
   let scopes;
-  try { scopes = resumeSession ? [["."]] : previousMetadata?.scopes || await repositoryScopes(repository, targetBytes); }
+  try { scopes = resumeSession ? [["."]] : previousMetadata?.scopes || await repositoryScopes(repository, targetBytes, Math.max(1, options.maxToolCalls - 5)); }
   catch (error) { console.error(error.message); return EXIT.arguments; }
   let outcome;
-  const partials = [], passFailures = [];
+  const partials = [], passFailures = [], initialPasses = scopes.length;
   if (scopes.length === 1) {
     outcome = await launchPi(repository, argsFor(sessionDir, `Perform the ${options.command} review now. The trusted review skill is already in your system prompt; do not search for or reread it. Return only its complete Markdown report.`, resumeSession), { ...env, NIGHTWATCH_SCOPES: JSON.stringify(scopes[0]) });
   } else {
     const passesDir = join(runDir, "passes");
     try { await containedDirectory(repository, passesDir); }
     catch { console.error("unable to create the scoped-pass directory"); return EXIT.arguments; }
+    const followedUp = new Set();
     for (let index = 0; index < scopes.length; index++) {
       const number = String(index + 1).padStart(3, "0"), reportPath = join(passesDir, `${number}.md`), scope = scopes[index];
       let report = await readFile(reportPath, "utf8").catch(() => "");
       if (!validateReport(report, options.command)) {
         const passSession = join(sessionDir, `pass-${number}`);
         await mkdir(passSession, { recursive: true });
-        const prompt = `Review only scoped pass ${index + 1} of ${scopes.length}: ${scope.join(", ")}. Investigate this scope thoroughly, note cross-scope questions without leaving the scope, and return only a complete Markdown ${options.command} report. Use AUDIT INCOMPLETE because final repository-wide synthesis happens later.`;
+        const prompt = `Review only scoped pass ${index + 1} of ${scopes.length}: ${scope.join(", ")}. Investigate this scope thoroughly, note cross-scope questions without leaving the scope, and return only a complete Markdown ${options.command} report. Under Unreviewed Areas, name every unreviewed or partially reviewed path using its full repository-relative path in backticks. Use AUDIT INCOMPLETE because final repository-wide synthesis happens later.`;
         const pass = await launchPi(repository, argsFor(passSession, prompt), { ...env, NIGHTWATCH_SCOPES: JSON.stringify(scope) });
         report = finalAssistantText(pass.raw) || "";
         if (pass.code === 0 && validateReport(report, options.command)) await writeFile(reportPath, report.trim() + "\n", { mode: 0o600 });
         else { const passExhausted = contextExhausted(pass.raw); passFailures.push(index + 1); await writeFile(join(passesDir, `${number}.diagnostic.log`), `AUDIT INCOMPLETE${passExhausted ? ": CONTEXT EXHAUSTED" : ""}\n\n${pass.stderr}\n${pass.raw}`, { mode: 0o600 }); }
         if (pass.interruptedBy) { outcome = pass; break; }
       }
-      if (validateReport(report, options.command)) partials.push({ scope, report });
+      if (validateReport(report, options.command)) {
+        partials.push({ scope, report });
+        if (index < initialPasses) {
+          const followup = unreviewedPaths(report, scope).filter(path => !followedUp.has(path));
+          if (followup.length) { followup.forEach(path => followedUp.add(path)); scopes.push(followup); }
+        }
+      }
     }
     if (!outcome) {
       const synthesisDir = join(runDir, "synthesis"), synthesisLimit = Math.max(16_000, options.contextWindow);
@@ -257,9 +274,9 @@ async function main(argv = process.argv.slice(2)) {
   }
   const { code, raw, stderr, interruptedBy } = outcome;
   const finalText = finalAssistantText(raw);
-  const valid = code === 0 && validateReport(finalText, options.command) && (!passFailures.length || /^## Run Status\s*\n+\s*AUDIT INCOMPLETE\s*$/im.test(finalText));
+  const valid = code === 0 && validateReport(finalText, options.command) && (!passFailures.length || hasIncompleteStatus(finalText));
   const exhausted = !valid && contextExhausted(raw);
-  const metadata = { version: "0.1.0", runId: runDir.split(sep).at(-1), mode: options.command, profile: options.profile, repository, model: options.model, baseUrl: options.baseUrl, contextWindow: options.contextWindow, maxToolCalls: options.maxToolCalls, scopes, completedPasses: partials.length, failedPasses: passFailures, git, resumed: Boolean(options.resume), startedAt: originalStart, endedAt: new Date().toISOString(), exitCode: code, status: valid ? "complete" : exhausted ? "context-exhausted" : code === 0 ? "malformed" : "pi-failure" };
+  const metadata = { version: "0.1.0", runId: runDir.split(sep).at(-1), mode: options.command, profile: options.profile, repository, model: options.model, baseUrl: options.baseUrl, contextWindow: options.contextWindow, maxToolCalls: options.maxToolCalls, scopes, completedPasses: partials.length, followupPasses: Math.max(0, scopes.length - initialPasses), failedPasses: passFailures, git, resumed: Boolean(options.resume), startedAt: originalStart, endedAt: new Date().toISOString(), exitCode: code, status: valid ? "complete" : exhausted ? "context-exhausted" : code === 0 ? "malformed" : "pi-failure" };
   await writeFile(join(runDir, "metadata.json"), JSON.stringify(metadata, null, 2) + "\n", { mode: 0o600 });
   if (!valid) {
     await writeFile(join(runDir, "diagnostic.log"), `AUDIT INCOMPLETE${exhausted ? ": CONTEXT EXHAUSTED" : ""}\n\n${stderr}\n${raw}`, { mode: 0o600 });

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import auditExtension from "../src/audit-extension.js";
-import { assistantText, containedDirectory, contextExhausted, loadConfig, parseArgs, validateReport } from "../bin/nightwatch.js";
+import { assistantText, containedDirectory, contextExhausted, hasIncompleteStatus, loadConfig, parseArgs, unreviewedPaths, validateReport } from "../bin/nightwatch.js";
 import { checkJavaScriptSyntax, detectRepositoryTooling, readRepositoryFile, readRepositoryLines, repositoryScopes, runRg, safePath } from "../src/repository.js";
 
 const validReport = `# Nightwatch Security Report
@@ -61,6 +61,10 @@ test("report validation checks structure and unique findings", () => {
   assert.equal(validateReport(validReport.replace("## Summary", "## Notes")), false);
   const finding = `### NW-001 — Test\nSeverity: LOW\nConfidence: HIGH\nAffected Files: a\nEvidence: e\nSuggested Action: s\nVerification: v\n`;
   assert.equal(validateReport(validReport.replace("No supported findings.", finding + finding)), false);
+  assert.equal(validateReport(validReport.replace("No supported findings.", finding.replaceAll(/^(Severity|Confidence|Affected Files|Evidence|Suggested Action|Verification):/gm, "- **$1:**"))), true);
+  assert.equal(hasIncompleteStatus(validReport.replace("COMPLETE", "`AUDIT INCOMPLETE` — scoped passes failed.")), true);
+  assert.equal(hasIncompleteStatus(validReport.replace("Nothing found.", "AUDIT INCOMPLETE appeared outside status.")), false);
+  assert.deepEqual(unreviewedPaths(validReport.replace("## Unreviewed Areas\nNone.", "## Unreviewed Areas\n`src/a.js` was partial.\n`elsewhere.js` was not reviewed."), ["src/a.js", "src/b.js"]), ["src/a.js"]);
   assert.equal(assistantText(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [null] } })), "");
   assert.equal(assistantText(JSON.stringify({ type: "message_end", message: { role: "assistant", content: "text" } })), undefined);
   const ux = validReport.replace("Security", "UX").replace("No supported findings.", "### UX-001 — Help\nSeverity: LOW\nConfidence: HIGH\nAffected Files: README.md\nEvidence: e\nSuggested Action: s\nVerification: v");
@@ -117,14 +121,15 @@ test("tool budget disables tools and requests the final report", async () => {
   assert.equal(message.options.deliverAs, "steer");
 });
 
-test("large repositories are divided into bounded path scopes", async () => {
+test("large repositories are divided into bounded file scopes", async () => {
   const root = await fixture();
   await mkdir(join(root, "alpha")); await mkdir(join(root, "beta"));
   await writeFile(join(root, "alpha", "large.txt"), Buffer.alloc(200_000));
   await writeFile(join(root, "beta", "large.txt"), Buffer.alloc(200_000));
-  const scopes = await repositoryScopes(root, 250_000);
+  const scopes = await repositoryScopes(root, 250_000, 2);
   assert.ok(scopes.length >= 2);
-  assert.ok(scopes.flat().includes("alpha")); assert.ok(scopes.flat().includes("beta"));
+  assert.ok(scopes.every(scope => scope.length <= 2));
+  assert.ok(scopes.flat().includes("alpha/large.txt")); assert.ok(scopes.flat().includes("beta/large.txt"));
 });
 
 test("tooling detection and JavaScript syntax checks are constrained", async () => {
@@ -177,13 +182,15 @@ test("CLI reviews large scopes in fresh sessions before synthesis", async () => 
   await mkdir(join(root, "alpha")); await mkdir(join(root, "beta"));
   await writeFile(join(root, "alpha", "large.txt"), Buffer.alloc(400_000));
   await writeFile(join(root, "beta", "large.txt"), Buffer.alloc(400_000));
-  const event = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: validReport }] } });
+  const scopedReport = validReport.replace("## Unreviewed Areas\nNone.", "## Unreviewed Areas\n`alpha/large.txt` was only partially reviewed.");
+  const event = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: scopedReport }] } });
   await writeFile(fake, `#!/bin/sh\nprintf '%s\\n' '${event}'\n`); await chmod(fake, 0o755);
   const result = await runCli(["security", root, "--base-url", "http://localhost:4000/v1", "--model", "local", "--context-window", "1024"], { NIGHTWATCH_PI: fake });
   assert.equal(result.code, 0, result.stderr);
   const run = (await readdir(join(root, ".nightwatch", "runs")))[0];
   assert.ok((await readdir(join(root, ".nightwatch", "runs", run, "passes"))).filter(file => file.endsWith(".md")).length >= 2);
   assert.ok((await readdir(join(root, ".nightwatch", "runs", run, "session"))).some(name => name.startsWith("synthesis-")));
+  assert.equal(JSON.parse(await readFile(join(root, ".nightwatch", "runs", run, "metadata.json"), "utf8")).followupPasses, 1);
 });
 
 test("malformed output and Pi failure do not publish", async () => {

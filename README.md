@@ -112,7 +112,7 @@ Analyzer execution is intentionally limited to Node's non-executing `--check` mo
 
 ### Large repositories
 
-Nightwatch automatically groups repository paths into size-bounded scopes. Each scope is reviewed in a fresh Pi session with tools restricted to that scope. Valid partial reports are retained under `passes/`, then recursively merged in fresh synthesis sessions until one repository-wide report fits. The synthesis session may inspect the full repository to verify cross-scope findings. Failed scopes are preserved diagnostically and force the published report to say `AUDIT INCOMPLETE`.
+Nightwatch automatically groups repository files into scopes bounded by both source size and the available tool-call budget. Each scope is reviewed in a fresh Pi session with tools restricted to those files. A scoped report that explicitly marks repository paths unreviewed receives one automatic follow-up pass. Valid partial reports are retained under `passes/`, then recursively merged in fresh synthesis sessions until one repository-wide report fits. The synthesis session may inspect the full repository to verify cross-scope findings. Failed scopes are preserved diagnostically and force the published report to say `AUDIT INCOMPLETE`.
 
 Exit codes:
 
